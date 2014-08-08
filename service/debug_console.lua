@@ -1,6 +1,7 @@
 local skynet = require "skynet"
 local codecache = require "skynet.codecache"
 local socket = require "socket"
+local snax = require "snax"
 
 local port = tonumber(...)
 local COMMAND = {}
@@ -87,7 +88,7 @@ end
 
 skynet.start(function()
 	local listen_socket = socket.listen ("127.0.0.1", port)
-	print("Start debug console at 127.0.0.1",port)
+	skynet.error("Start debug console at 127.0.0.1 " .. port)
 	socket.start(listen_socket , function(id, addr)
 		local function print(...)
 			local t = { ... }
@@ -105,13 +106,14 @@ function COMMAND.help()
 		list = "List all the service",
 		stat = "Dump all stats",
 		info = "Info address : get service infomation",
-		timing = "timing address : get service timing infomation",
 		kill = "kill address : kill service",
 		mem = "mem : show memory status",
 		gc = "gc : force every lua service do garbage collect",
-		reload = "reload address : reload a lua service",
 		start = "lanuch a new lua service",
+		snax = "lanuch a new snax service",
 		clearcache = "clear lua code cache",
+		service = "List unique service",
+		task = "task address : show service task detail",
 	}
 end
 
@@ -128,4 +130,16 @@ function COMMAND.start(...)
 	end
 end
 
+function COMMAND.snax(...)
+	local s = snax.newservice(...)
+	if s then
+		local addr = s.handle
+		return { [skynet.address(addr)] = ... }
+	else
+		return "Failed"
+	end
+end
 
+function COMMAND.service()
+	return skynet.call("SERVICE", "lua", "LIST")
+end

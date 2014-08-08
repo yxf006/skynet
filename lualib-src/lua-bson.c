@@ -68,6 +68,13 @@ struct bson_reader {
 	int size;
 };
 
+static inline int32_t
+get_length(const uint8_t * data) {
+	const uint8_t * b = (const uint8_t *)data;
+	int32_t len = b[0] | b[1]<<8 | b[2]<<16 | b[3]<<24;
+	return len;
+}
+
 static inline void
 bson_destroy(struct bson *b) {
 	if (b->ptr != b->buffer) {
@@ -256,13 +263,13 @@ append_key(struct bson *bs, int type, const char *key, size_t sz) {
 
 static void
 append_number(struct bson *bs, lua_State *L, const char *key, size_t sz) {
-	lua_Integer i = lua_tointeger(L, -1);
+	int64_t i = lua_tointeger(L, -1);
 	lua_Number d = lua_tonumber(L,-1);
 	if (i != d) {
 		append_key(bs, BSON_REAL, key, sz);
 		write_double(bs, d);
 	} else {
-		int si = (int64_t)i >> 32;
+		int si = i >> 31;
 		if (si == 0 || si == -1) {
 			append_key(bs, BSON_INT32, key, sz);
 			write_int32(bs, i);
@@ -457,7 +464,7 @@ pack_dict(lua_State *L, struct bson *b, bool isarray) {
 }
 
 static void
-pack_sorted_dict(lua_State *L, struct bson *b, int n) {
+pack_ordered_dict(lua_State *L, struct bson *b, int n) {
 	int length = reserve_length(b);
 	int i;
 	for (i=0;i<n;i+=2) {
@@ -532,6 +539,9 @@ unpack_dict(lua_State *L, struct bson_reader *br, bool array) {
 			break;
 		case BSON_STRING: {
 			int sz = read_int32(L, &t);
+			if (sz <= 0) {
+				luaL_error(L, "Invalid bson string , length = %d", sz);
+			}
 			lua_pushlstring(L, read_bytes(L, &t, sz), sz-1);
 			break;
 		}
@@ -641,7 +651,7 @@ static int
 lmakeindex(lua_State *L) {
 	int32_t *bson = luaL_checkudata(L,1,"bson");
 	const uint8_t * start = (const uint8_t *)bson;
-	struct bson_reader br = { start+4, *bson - 5 };
+	struct bson_reader br = { start+4, get_length(start) - 5 };
 	lua_newtable(L);
 
 	for (;;) {
@@ -804,6 +814,9 @@ lreplace(lua_State *L) {
 		write_int64(&b, i);
 		break;
 	}
+	default:
+		luaL_error(L, "Can't replace type %d", type);
+		break;
 	}
 	return 0;
 }
@@ -814,7 +827,9 @@ ldecode(lua_State *L) {
 	if (data == NULL) {
 		return 0;
 	}
-	struct bson_reader br = { (const uint8_t *)data , *data };
+	const uint8_t * b = (const uint8_t *)data;
+	int32_t len = get_length(b);
+	struct bson_reader br = { b , len };
 
 	unpack_dict(L, &br, false);
 
@@ -863,7 +878,7 @@ lencode_order(lua_State *L) {
 	if (n%2 != 0) {
 		return luaL_error(L, "Invalid ordered dict");
 	}
-	pack_sorted_dict(L, &b, n);
+	pack_ordered_dict(L, &b, n);
 	lua_settop(L,1);
 	void * ud = lua_newuserdata(L, b.size);
 	memcpy(ud, b.ptr, b.size);
@@ -1068,7 +1083,7 @@ typeclosure(lua_State *L) {
 		"string",	// 5
 		"binary",	// 6
 		"objectid",	// 7
-		"timestamp",// 8
+		"timestamp",    // 8
 		"date",		// 9
 		"regex",	// 10
 		"minkey",	// 11
@@ -1134,14 +1149,14 @@ lobjectid(lua_State *L) {
 		}
 	} else {
 		time_t ti = time(NULL);
-		oid[2] = ti & 0xff;
-		oid[3] = (ti>>8) & 0xff;
-		oid[4] = (ti>>16) & 0xff;
-		oid[5] = (ti>>24) & 0xff;
+		oid[2] = (ti>>24) & 0xff;
+		oid[3] = (ti>>16) & 0xff;
+		oid[4] = (ti>>8) & 0xff;
+		oid[5] = ti & 0xff;
 		memcpy(oid+6 , oid_header, 5);
-		oid[11] = oid_counter & 0xff; 
+		oid[11] = (oid_counter>>16) & 0xff; 
 		oid[12] = (oid_counter>>8) & 0xff; 
-		oid[13] = (oid_counter>>16) & 0xff; 
+		oid[13] = oid_counter & 0xff; 
 		++oid_counter;
 	}
 	lua_pushlstring( L, (const char *)oid, 14);
@@ -1165,7 +1180,6 @@ luaopen_bson(lua_State *L) {
 		{ "timestamp", ltimestamp  },
 		{ "regex", lregex },
 		{ "binary", lbinary },
-		{ "regex", lregex },
 		{ "objectid", lobjectid },
 		{ "decode", ldecode },
 		{ NULL,  NULL },
@@ -1188,3 +1202,4 @@ luaopen_bson(lua_State *L) {
 
 	return 1;
 }
+

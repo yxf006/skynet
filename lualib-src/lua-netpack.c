@@ -1,3 +1,5 @@
+#include "skynet_malloc.h"
+
 #include "skynet_socket.h"
 
 #include <lua.h>
@@ -48,7 +50,7 @@ clear_list(struct uncomplete * uc) {
 	while (uc) {
 		void * tmp = uc;
 		uc = uc->next;
-		free(tmp);
+		skynet_free(tmp);
 	}
 }
 
@@ -68,7 +70,7 @@ lclear(lua_State *L) {
 	}
 	for (i=q->head;i<q->tail;i++) {
 		struct netpack *np = &q->queue[i % q->cap];
-		free(np->buffer);
+		skynet_free(np->buffer);
 	}
 	q->head = q->tail = 0;
 
@@ -144,7 +146,7 @@ expand_queue(lua_State *L, struct queue *q) {
 static void
 push_data(lua_State *L, int fd, void *buffer, int size, int clone) {
 	if (clone) {
-		void * tmp = malloc(size);
+		void * tmp = skynet_malloc(size);
 		memcpy(tmp, buffer, size);
 		buffer = tmp;
 	}
@@ -164,7 +166,7 @@ static struct uncomplete *
 save_uncomplete(lua_State *L, int fd) {
 	struct queue *q = get_queue(L);
 	int h = hash_fd(fd);
-	struct uncomplete * uc = malloc(sizeof(struct uncomplete));
+	struct uncomplete * uc = skynet_malloc(sizeof(struct uncomplete));
 	memset(uc, 0, sizeof(*uc));
 	uc->next = q->hash[h];
 	uc->pack.id = fd;
@@ -195,7 +197,7 @@ push_more(lua_State *L, int fd, uint8_t *buffer, int size) {
 		struct uncomplete * uc = save_uncomplete(L, fd);
 		uc->read = size;
 		uc->pack.size = pack_size;
-		uc->pack.buffer = malloc(pack_size);
+		uc->pack.buffer = skynet_malloc(pack_size);
 		memcpy(uc->pack.buffer, buffer, size);
 		return;
 	}
@@ -222,7 +224,7 @@ filter_data_(lua_State *L, int fd, uint8_t * buffer, int size) {
 			++buffer;
 			--size;
 			uc->pack.size = pack_size;
-			uc->pack.buffer = malloc(pack_size);
+			uc->pack.buffer = skynet_malloc(pack_size);
 			uc->read = 0;
 		}
 		int need = uc->pack.size - uc->read;
@@ -242,12 +244,12 @@ filter_data_(lua_State *L, int fd, uint8_t * buffer, int size) {
 			lua_pushinteger(L, fd);
 			lua_pushlightuserdata(L, uc->pack.buffer);
 			lua_pushinteger(L, uc->pack.size);
-			free(uc);
+			skynet_free(uc);
 			return 5;
 		}
 		// more data
 		push_data(L, fd, uc->pack.buffer, uc->pack.size, 0);
-		free(uc);
+		skynet_free(uc);
 		push_more(L, fd, buffer, size);
 		lua_pushvalue(L, lua_upvalueindex(TYPE_MORE));
 		return 2;
@@ -266,7 +268,7 @@ filter_data_(lua_State *L, int fd, uint8_t * buffer, int size) {
 			struct uncomplete * uc = save_uncomplete(L, fd);
 			uc->read = size;
 			uc->pack.size = pack_size;
-			uc->pack.buffer = malloc(pack_size);
+			uc->pack.buffer = skynet_malloc(pack_size);
 			memcpy(uc->pack.buffer, buffer, size);
 			return 1;
 		}
@@ -274,7 +276,7 @@ filter_data_(lua_State *L, int fd, uint8_t * buffer, int size) {
 			// just one package
 			lua_pushvalue(L, lua_upvalueindex(TYPE_DATA));
 			lua_pushinteger(L, fd);
-			void * result = malloc(pack_size);
+			void * result = skynet_malloc(pack_size);
 			memcpy(result, buffer, size);
 			lua_pushlightuserdata(L, result);
 			lua_pushinteger(L, size);
@@ -295,7 +297,7 @@ filter_data(lua_State *L, int fd, uint8_t * buffer, int size) {
 	int ret = filter_data_(L, fd, buffer, size);
 	// buffer is the data of socket message, it malloc at socket_server.c : function forward_message .
 	// it should be free before return,
-	free(buffer);
+	skynet_free(buffer);
 	return ret;
 }
 
@@ -391,13 +393,13 @@ lpop(lua_State *L) {
  */
 
 static const char *
-tolstring(lua_State *L, size_t *sz) {
+tolstring(lua_State *L, size_t *sz, int index) {
 	const char * ptr;
-	if (lua_isuserdata(L,1)) {
-		ptr = (const char *)lua_touserdata(L,1);
-		*sz = (size_t)luaL_checkinteger(L, 2);
+	if (lua_isuserdata(L,index)) {
+		ptr = (const char *)lua_touserdata(L,index);
+		*sz = (size_t)luaL_checkinteger(L, index+1);
 	} else {
-		ptr = luaL_checklstring(L, 1, sz);
+		ptr = luaL_checklstring(L, index, sz);
 	}
 	return ptr;
 }
@@ -411,12 +413,12 @@ write_size(uint8_t * buffer, int len) {
 static int
 lpack(lua_State *L) {
 	size_t len;
-	const char * ptr = tolstring(L, &len);
+	const char * ptr = tolstring(L, &len, 1);
 	if (len > 0x10000) {
 		return luaL_error(L, "Invalid size (too long) of data : %d", (int)len);
 	}
 
-	uint8_t * buffer = malloc(len + 2);
+	uint8_t * buffer = skynet_malloc(len + 2);
 	write_size(buffer, len);
 	memcpy(buffer+2, ptr, len);
 
@@ -431,7 +433,7 @@ lpack_string(lua_State *L) {
 	uint8_t tmp[SMALLSTRING+2];
 	size_t len;
 	uint8_t *buffer;
-	const char * ptr = tolstring(L, &len);
+	const char * ptr = tolstring(L, &len, 1);
 	if (len > 0x10000) {
 		return luaL_error(L, "Invalid size (too long) of data : %d", (int)len);
 	}
@@ -450,14 +452,53 @@ lpack_string(lua_State *L) {
 }
 
 static int
+lpack_padding(lua_State *L) {
+	uint8_t tmp[SMALLSTRING+2];
+	size_t content_sz;
+	uint8_t *buffer;
+	const char * ptr = tolstring(L, &content_sz, 2);
+	size_t cookie_sz = 0;
+	const char * cookie = luaL_checklstring(L,1,&cookie_sz);
+	size_t len = cookie_sz + content_sz;
+
+	if (len > 0x10000) {
+		return luaL_error(L, "Invalid size (too long) of data : %d", (int)len);
+	}
+
+	if (len <= SMALLSTRING) {
+		buffer = tmp;
+	} else {
+		buffer = lua_newuserdata(L, len + 2);
+	}
+
+	write_size(buffer, len);
+	memcpy(buffer+2, ptr, content_sz);
+	memcpy(buffer+2+content_sz, cookie, cookie_sz);
+	lua_pushlstring(L, (const char *)buffer, len+2);
+
+	return 1;
+}
+
+static int
 ltostring(lua_State *L) {
 	void * ptr = lua_touserdata(L, 1);
 	int size = luaL_checkinteger(L, 2);
 	if (ptr == NULL) {
 		lua_pushliteral(L, "");
 	} else {
-		lua_pushlstring(L, (const char *)ptr, size);
-		free(ptr);
+		if (lua_isnumber(L, 3)) {
+			int offset = lua_tointeger(L, 3);
+			if (offset < 0) {
+				return luaL_error(L, "Invalid offset %d", offset);
+			}
+			if (offset > size) {
+				offset = size;
+			}
+			lua_pushlstring(L, (const char *)ptr + offset, size-offset);
+		} else {
+			lua_pushlstring(L, (const char *)ptr, size);
+			skynet_free(ptr);
+		}
 	}
 	return 1;
 }
@@ -469,6 +510,7 @@ luaopen_netpack(lua_State *L) {
 		{ "pop", lpop },
 		{ "pack", lpack },
 		{ "pack_string", lpack_string },
+		{ "pack_padding", lpack_padding },
 		{ "clear", lclear },
 		{ "tostring", ltostring },
 		{ NULL, NULL },

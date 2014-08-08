@@ -1,5 +1,8 @@
+#include "skynet.h"
+
 #include "skynet_imp.h"
 #include "skynet_env.h"
+#include "skynet_server.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +11,7 @@
 #include <lualib.h>
 #include <lauxlib.h>
 #include <signal.h>
+#include <assert.h>
 
 static int
 optint(const char *key, int opt) {
@@ -32,6 +36,7 @@ optboolean(const char *key, int opt) {
 	return strcmp(str,"true")==0;
 }
 */
+
 static const char *
 optstring(const char *key,const char * opt) {
 	const char * str = skynet_getenv(key);
@@ -47,7 +52,6 @@ optstring(const char *key,const char * opt) {
 
 static void
 _init_env(lua_State *L) {
-	lua_pushglobaltable(L);
 	lua_pushnil(L);  /* first key */
 	while (lua_next(L, -2) != 0) {
 		int keyt = lua_type(L, -2);
@@ -79,25 +83,40 @@ int sigign() {
 	return 0;
 }
 
+static const char * load_config = "\
+	local config_name = ...\
+	local f = assert(io.open(config_name))\
+	local code = assert(f:read \'*a\')\
+	local function getenv(name) return assert(os.getenv(name), name) end\
+	code = string.gsub(code, \'%$([%w_%d]+)\', getenv)\
+	print(code)\
+	f:close()\
+	local result = {}\
+	assert(load(code,\'=(load)\',\'t\',result))()\
+	return result\
+";
+
 int
 main(int argc, char *argv[]) {
 	const char * config_file = "config";
 	if (argc > 1) {
 		config_file = argv[1];
 	}
+	skynet_globalinit();
 	skynet_env_init();
 
 	sigign();
 
 	struct skynet_config config;
 
-	struct lua_State *L = luaL_newstate();
+	struct lua_State *L = lua_newstate(skynet_lalloc, NULL);
 	luaL_openlibs(L);	// link lua lib
-	lua_close(L);
 
-	L = luaL_newstate();
-
-	int err = luaL_dofile(L, config_file);
+	int err = luaL_loadstring(L, load_config);
+	assert(err == LUA_OK);
+	lua_pushstring(L, config_file);
+	
+	err = lua_pcall(L, 1, 1, 0);
 	if (err) {
 		fprintf(stderr,"%s\n",lua_tostring(L,-1));
 		lua_close(L);
@@ -105,30 +124,17 @@ main(int argc, char *argv[]) {
 	} 
 	_init_env(L);
 
-#ifdef LUA_CACHELIB
-  printf("Skynet lua code cache enable\n");
-#endif
-
-	const char *path = optstring("lua_path","./lualib/?.lua;./lualib/?/init.lua");
-	setenv("LUA_PATH",path,1);
-	const char *cpath = optstring("lua_cpath","./luaclib/?.so");
-	setenv("LUA_CPATH",cpath,1);
-	optstring("luaservice","./service/?.lua");
-
 	config.thread =  optint("thread",8);
 	config.module_path = optstring("cpath","./cservice/?.so");
-	config.logger = optstring("logger",NULL);
 	config.harbor = optint("harbor", 1);
-	config.master = optstring("master","127.0.0.1:2012");
-	config.start = optstring("start","main.lua");
-	config.local = optstring("address","127.0.0.1:2525");
-	config.standalone = optstring("standalone",NULL);
+	config.bootstrap = optstring("bootstrap","snlua bootstrap");
+	config.daemon = optstring("daemon", NULL);
+	config.logger = optstring("logger", NULL);
 
 	lua_close(L);
 
 	skynet_start(&config);
-
-	printf("skynet exit\n");
+	skynet_globalexit();
 
 	return 0;
 }

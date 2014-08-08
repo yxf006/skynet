@@ -26,9 +26,10 @@ function socket_channel.channel(desc)
 	local c = {
 		__host = assert(desc.host),
 		__port = assert(desc.port),
+		__backup = desc.backup,
 		__auth = desc.auth,
-		__response = desc.response,
-		__request = {},	-- request seq { response func or session }
+		__response = desc.response,	-- It's for session mode
+		__request = {},	-- request seq { response func or session }	-- It's for order mode
 		__thread = {}, -- coroutine seq or session->coroutine map
 		__result = {}, -- response result { coroutine -> result }
 		__result_data = {},
@@ -51,109 +52,178 @@ local function close_channel_socket(self)
 end
 
 local function wakeup_all(self, errmsg)
-	for i = 1, #self.__thread do
-		local co = self.__thread[i]
-		self.__thread[i] = nil
-		self.__result[co] = socket_error
-		self.__result_data[co] = errmsg
-		skynet.wakeup(co)
+	if self.__response then
+		for k,co in pairs(self.__thread) do
+			self.__thread[k] = nil
+			self.__result[co] = socket_error
+			self.__result_data[co] = errmsg
+			skynet.wakeup(co)
+		end
+	else
+		for i = 1, #self.__request do
+			self.__request[i] = nil
+		end
+		for i = 1, #self.__thread do
+			local co = self.__thread[i]
+			self.__thread[i] = nil
+			self.__result[co] = socket_error
+			self.__result_data[co] = errmsg
+			skynet.wakeup(co)
+		end
 	end
 end
 
-local function dispatch_response(self)
+
+
+local function dispatch_by_session(self)
 	local response = self.__response
-	if response then
-		-- response() return session
-		while self.__sock do
-			local ok , session, result_ok, result_data = pcall(response, self.__sock)
-			if ok and session then
-				local co = self.__thread[session]
-				self.__thread[session] = nil
-				if co then
-					self.__result[co] = result_ok
-					self.__result_data[co] = result_data
-					skynet.wakeup(co)
-				else
-					print("socket: unknown session :", session)
-				end
+	-- response() return session
+	while self.__sock do
+		local ok , session, result_ok, result_data = pcall(response, self.__sock)
+		if ok and session then
+			local co = self.__thread[session]
+			self.__thread[session] = nil
+			if co then
+				self.__result[co] = result_ok
+				self.__result_data[co] = result_data
+				skynet.wakeup(co)
+			else
+				skynet.error("socket: unknown session :", session)
+			end
+		else
+			close_channel_socket(self)
+			local errormsg
+			if session ~= socket_error then
+				errormsg = session
+			end
+			wakeup_all(self, errormsg)
+		end
+	end
+end
+
+local function pop_response(self)
+	return table.remove(self.__request, 1), table.remove(self.__thread, 1)
+end
+
+local function push_response(self, response, co)
+	if self.__response then
+		-- response is session
+		self.__thread[response] = co
+	else
+		-- response is a function, push it to __request
+		table.insert(self.__request, response)
+		table.insert(self.__thread, co)
+	end
+end
+
+local function dispatch_by_order(self)
+	while self.__sock do
+		local func, co = pop_response(self)
+		if func == nil then
+			if not socket.block(self.__sock[1]) then
+				close_channel_socket(self)
+				wakeup_all(self)
+			end
+		else
+			local ok, result_ok, result_data = pcall(func, self.__sock)
+			if ok then
+				self.__result[co] = result_ok
+				self.__result_data[co] = result_data
+				skynet.wakeup(co)
 			else
 				close_channel_socket(self)
-				local errormsg
-				if session ~= socket_error then
-					errormsg = session
+				local errmsg
+				if result ~= socket_error then
+					errmsg = result_ok
 				end
-				for k,co in pairs(self.__thread) do
-					-- throw error (errormsg)
-					self.__thread[k] = nil
-					self.__result[co] = socket_error
-					self.__result_data[co] = errormsg
-					skynet.wakeup(co)
-				end
+				self.__result[co] = socket_error
+				self.__result_data[co] = errmsg
+				skynet.wakeup(co)
+				wakeup_all(self, errmsg)
 			end
 		end
+	end
+end
+
+local function dispatch_function(self)
+	if self.__response then
+		return dispatch_by_session
 	else
-		-- pop response function from __request
-		while self.__sock do
-			local func = table.remove(self.__request, 1)
-			if func == nil then
-				if not socket.block(self.__sock[1]) then
-					close_channel_socket(self)
-					wakeup_all(self)
-				end
+		return dispatch_by_order
+	end
+end
+
+local function connect_backup(self)
+	if self.__backup then
+		for _, addr in ipairs(self.__backup) do
+			local host, port
+			if type(addr) == "table" then
+				host, port = addr.host, addr.port
 			else
-				local ok, result_ok, result_data = pcall(func, self.__sock)
-				if ok then
-					local co = table.remove(self.__thread, 1)
-					self.__result[co] = result_ok
-					self.__result_data[co] = result_data
-					skynet.wakeup(co)
-				else
-					close_channel_socket(self)
-					local errmsg
-					if result ~= socket_error then
-						errmsg = result_ok
-					end
-					wakeup_all(self, errmsg)
-				end
+				host = addr
+				port = self.__port
+			end
+			skynet.error("socket: connect to backup host", host, port)
+			local fd = socket.open(host, port)
+			if fd then
+				self.__host = host
+				self.__port = port
+				return fd
 			end
 		end
 	end
 end
 
 local function connect_once(self)
+	if self.__closed then
+		return false
+	end
 	assert(not self.__sock and not self.__authcoroutine)
 	local fd = socket.open(self.__host, self.__port)
 	if not fd then
-		return false
+		fd = connect_backup(self)
+		if not fd then
+			return false
+		end
 	end
-	self.__authcoroutine = coroutine.running()
+
 	self.__sock = setmetatable( {fd} , channel_socket_meta )
-	skynet.fork(dispatch_response, self)
+	skynet.fork(dispatch_function(self), self)
 
 	if self.__auth then
+		self.__authcoroutine = coroutine.running()
 		local ok , message = pcall(self.__auth, self)
 		if not ok then
 			close_channel_socket(self)
 			if message ~= socket_error then
-				print("socket: auth failed", message)
+				self.__authcoroutine = false
+				skynet.error("socket: auth failed", message)
 			end
 		end
 		self.__authcoroutine = false
+		if ok and not self.__sock then
+			-- auth may change host, so connect again
+			return connect_once(self)
+		end
 		return ok
 	end
 
-	self.__authcoroutine = false
 	return true
 end
 
-local function try_connect(self)
-	local t = 100
+local function try_connect(self , once)
+	local t = 0
 	while not self.__closed do
 		if connect_once(self) then
+			if not once then
+				skynet.error("socket: connect to", self.__host, self.__port)
+			end
 			return
+		elseif once then
+			error(string.format("Connect to %s:%d failed", self.__host, self.__port))
 		end
 		if t > 1000 then
-			print("socket: try to reconnect", self.__host, self.__port)
+			skynet.error("socket: try to reconnect", self.__host, self.__port)
 			skynet.sleep(t)
 			t = 0
 		else
@@ -163,7 +233,7 @@ local function try_connect(self)
 	end
 end
 
-local function block_connect(self)
+local function block_connect(self, once)
 	if self.__sock then
 		local authco = self.__authcoroutine
 		if not authco then
@@ -177,17 +247,17 @@ local function block_connect(self)
 	if self.__closed then
 		return false
 	end
+
 	if #self.__connecting > 0 then
 		-- connecting in other coroutine
 		local co = coroutine.running()
 		table.insert(self.__connecting, co)
 		skynet.wait()
 		-- check connection again
-		return block_connect(self)
+		return block_connect(self, once)
 	end
-
 	self.__connecting[1] = true
-	try_connect(self)
+	try_connect(self, once)
 	self.__connecting[1] = nil
 	for i=2, #self.__connecting do
 		local co = self.__connecting[i]
@@ -196,21 +266,41 @@ local function block_connect(self)
 	end
 
 	-- check again
-	return block_connect(self)
+	return block_connect(self, once)
 end
 
-function channel:connect()
+function channel:connect(once)
 	if self.__closed then
 		self.__closed = false
 	end
 
-	return block_connect(self)
+	return block_connect(self, once)
+end
+
+local function wait_for_response(self, response)
+	local co = coroutine.running()
+	push_response(self, response, co)
+	skynet.wait()
+
+	local result = self.__result[co]
+	self.__result[co] = nil
+	local result_data = self.__result_data[co]
+	self.__result_data[co] = nil
+
+	if result == socket_error then
+		error(socket_error)
+	else
+		assert(result, result_data)
+		return result_data
+	end
 end
 
 function channel:request(request, response)
 	assert(block_connect(self))
 
 	if not socket.write(self.__sock[1], request) then
+		close_channel_socket(self)
+		wakeup_all(self)
 		error(socket_error)
 	end
 
@@ -219,59 +309,13 @@ function channel:request(request, response)
 		return
 	end
 
-	local co = coroutine.running()
-
-	if self.__response then
-		-- response is session
-		self.__thread[response] = co
-	else
-		-- response is a function, push it to __request
-		table.insert(self.__request, response)
-		table.insert(self.__thread, co)
-	end
-	skynet.wait()
-
-	local result = self.__result[co]
-	self.__result[co] = nil
-	local result_data = self.__result_data[co]
-	self.__result_data[co] = nil
-
-	if result == socket_error then
-		if result_data then
-			print("socket: dispatch", request, result_data)
-		end
-		error(socket_error)
-	else
-		assert(result, result_data)
-		return result_data
-	end
+	return wait_for_response(self, response)
 end
 
 function channel:response(response)
 	assert(block_connect(self))
 
-	assert(type(response) == "function")
-
-	local co = coroutine.running()
-	table.insert(self.__request, response)
-	table.insert(self.__thread, co)
-
-	skynet.wait()
-
-	local result = self.__result[co]
-	self.__result[co] = nil
-	local result_data = self.__result_data[co]
-	self.__result_data[co] = nil
-
-	if result == socket_error then
-		if result_data then
-			print("socket: dispatch", request, result_data)
-		end
-		error(socket_error)
-	else
-		assert(result, result_data)
-		return result_data
-	end
+	return wait_for_response(self, response)
 end
 
 function channel:close()
@@ -279,6 +323,20 @@ function channel:close()
 		self.__closed = true
 		close_channel_socket(self)
 	end
+end
+
+function channel:changehost(host, port)
+	self.__host = host
+	if port then
+		self.__port = port
+	end
+	if not self.__closed then
+		close_channel_socket(self)
+	end
+end
+
+function channel:changebackup(backup)
+	self.__backup = backup
 end
 
 channel_meta.__gc = channel.close

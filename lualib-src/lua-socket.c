@@ -1,3 +1,5 @@
+#include "skynet_malloc.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
@@ -8,11 +10,11 @@
 #include <lauxlib.h>
 
 #include "skynet_socket.h"
-#include "service_lua.h"
 
 #define BACKLOG 32
 // 2 ** 12 == 4096
 #define LARGE_PAGE_NODE 12
+#define BUFFER_LIMIT (256 * 1024)
 
 struct buffer_node {
 	char * msg;
@@ -35,7 +37,7 @@ lfreepool(lua_State *L) {
 	for (i=0;i<sz;i++) {
 		struct buffer_node *node = &pool[i];
 		if (node->msg) {
-			free(node->msg);
+			skynet_free(node->msg);
 			node->msg = NULL;
 		}
 	}
@@ -140,7 +142,7 @@ return_free_node(lua_State *L, int pool, struct socket_buffer *sb) {
 	lua_rawgeti(L,pool,1);
 	free_node->next = lua_touserdata(L,-1);
 	lua_pop(L,1);
-	free(free_node->msg);
+	skynet_free(free_node->msg);
 	free_node->msg = NULL;
 
 	free_node->sz = 0;
@@ -187,10 +189,29 @@ pop_lstring(lua_State *L, struct socket_buffer *sb, int sz, int skip) {
 	luaL_pushresult(&b);
 }
 
+static int
+lheader(lua_State *L) {
+	size_t len;
+	const uint8_t * s = (const uint8_t *)luaL_checklstring(L, 1, &len);
+	if (len > 4 || len < 1) {
+		return luaL_error(L, "Invalid read %s", s);
+	}
+	int i;
+	size_t sz = 0;
+	for (i=0;i<(int)len;i++) {
+		sz <<= 8;
+		sz |= s[i];
+	}
+
+	lua_pushunsigned(L, sz);
+
+	return 1;
+}
+
 /*
 	userdata send_buffer
 	table pool
-	integer sz
+	integer sz 
  */
 static int
 lpopbuffer(lua_State *L) {
@@ -225,6 +246,7 @@ lclearbuffer(lua_State *L) {
 	while(sb->head) {
 		return_free_node(L,2,sb);
 	}
+	sb->size = 0;
 	return 0;
 }
 
@@ -243,6 +265,7 @@ lreadall(lua_State *L) {
 		return_free_node(L,2,sb);
 	}
 	luaL_pushresult(&b);
+	sb->size = 0;
 	return 1;
 }
 
@@ -250,7 +273,7 @@ static int
 ldrop(lua_State *L) {
 	void * msg = lua_touserdata(L,1);
 	luaL_checkinteger(L,2);
-	free(msg);
+	skynet_free(msg);
 	return 0;
 }
 
@@ -321,7 +344,7 @@ static int
 lstr2p(lua_State *L) {
 	size_t sz = 0;
 	const char * str = luaL_checklstring(L,1,&sz);
-	void *ptr = malloc(sz);
+	void *ptr = skynet_malloc(sz);
 	memcpy(ptr, str, sz);
 	lua_pushlightuserdata(L, ptr);
 	lua_pushinteger(L, (int)sz);
@@ -411,7 +434,7 @@ get_buffer(lua_State *L, int *sz) {
 	} else {
 		size_t len = 0;
 		const char * str =  luaL_checklstring(L, 2, &len);
-		buffer = malloc(len);
+		buffer = skynet_malloc(len);
 		memcpy(buffer, str, len);
 		*sz = (int)len;
 	}
@@ -456,6 +479,14 @@ lstart(lua_State *L) {
 	return 0;
 }
 
+static int
+lnodelay(lua_State *L) {
+	struct skynet_context * ctx = lua_touserdata(L, lua_upvalueindex(1));
+	int id = luaL_checkinteger(L, 1);
+	skynet_socket_nodelay(ctx,id);
+	return 0;
+}
+
 int
 luaopen_socketdriver(lua_State *L) {
 	luaL_checkversion(L);
@@ -468,6 +499,7 @@ luaopen_socketdriver(lua_State *L) {
 		{ "clear", lclearbuffer },
 		{ "readline", lreadline },
 		{ "str2p", lstr2p },
+		{ "header", lheader },
 
 		{ "unpack", lunpack },
 		{ NULL, NULL },
@@ -481,17 +513,15 @@ luaopen_socketdriver(lua_State *L) {
 		{ "lsend", lsendlow },
 		{ "bind", lbind },
 		{ "start", lstart },
+		{ "nodelay", lnodelay },
 		{ NULL, NULL },
 	};
-	lua_getfield(L, LUA_REGISTRYINDEX, "skynet_lua");
-	struct snlua *lua = lua_touserdata(L,-1);
-	if (lua == NULL || lua->ctx == NULL) {
+	lua_getfield(L, LUA_REGISTRYINDEX, "skynet_context");
+	struct skynet_context *ctx = lua_touserdata(L,-1);
+	if (ctx == NULL) {
 		return luaL_error(L, "Init skynet context first");
 	}
-	assert(lua->L == L);
-	lua_pop(L,1);
 
-	lua_pushlightuserdata(L, lua->ctx);
 	luaL_setfuncs(L,l2,1);
 
 	return 1;

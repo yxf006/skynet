@@ -11,7 +11,7 @@ struct logger {
 
 struct logger *
 logger_create(void) {
-	struct logger * inst = malloc(sizeof(*inst));
+	struct logger * inst = skynet_malloc(sizeof(*inst));
 	inst->handle = NULL;
 	inst->close = 0;
 	return inst;
@@ -22,13 +22,13 @@ logger_release(struct logger * inst) {
 	if (inst->close) {
 		fclose(inst->handle);
 	}
-	free(inst);
+	skynet_free(inst);
 }
 
 static int
 _logger(struct skynet_context * context, void *ud, int type, int session, uint32_t source, const void * msg, size_t sz) {
 	struct logger * inst = ud;
-	fprintf(inst->handle, "[:%x] ",source);
+	fprintf(inst->handle, "[:%08x] ",source);
 	fwrite(msg, sz , 1, inst->handle);
 	fprintf(inst->handle, "\n");
 	fflush(inst->handle);

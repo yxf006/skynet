@@ -5,10 +5,9 @@
 #include "skynet_handle.h"
 #include "skynet_module.h"
 #include "skynet_timer.h"
-#include "skynet_harbor.h"
-#include "skynet_group.h"
 #include "skynet_monitor.h"
 #include "skynet_socket.h"
+#include "skynet_daemon.h"
 
 #include <pthread.h>
 #include <unistd.h>
@@ -28,6 +27,7 @@ struct monitor {
 struct worker_parm {
 	struct monitor *m;
 	int id;
+	int weight;
 };
 
 #define CHECK_ABORT if (skynet_context_total()==0) break;
@@ -51,6 +51,7 @@ wakeup(struct monitor *m, int busy) {
 static void *
 _socket(void *p) {
 	struct monitor * m = p;
+	skynet_initthread(THREAD_SOCKET);
 	for (;;) {
 		int r = skynet_socket_poll();
 		if (r==0)
@@ -73,8 +74,8 @@ free_monitor(struct monitor *m) {
 	}
 	pthread_mutex_destroy(&m->mutex);
 	pthread_cond_destroy(&m->cond);
-	free(m->m);
-	free(m);
+	skynet_free(m->m);
+	skynet_free(m);
 }
 
 static void *
@@ -82,6 +83,7 @@ _monitor(void *p) {
 	struct monitor * m = p;
 	int i;
 	int n = m->count;
+	skynet_initthread(THREAD_MONITOR);
 	for (;;) {
 		CHECK_ABORT
 		for (i=0;i<n;i++) {
@@ -99,6 +101,7 @@ _monitor(void *p) {
 static void *
 _timer(void *p) {
 	struct monitor * m = p;
+	skynet_initthread(THREAD_TIMER);
 	for (;;) {
 		skynet_updatetime();
 		CHECK_ABORT
@@ -116,10 +119,14 @@ static void *
 _worker(void *p) {
 	struct worker_parm *wp = p;
 	int id = wp->id;
+	int weight = wp->weight;
 	struct monitor *m = wp->m;
 	struct skynet_monitor *sm = m->m[id];
+	skynet_initthread(THREAD_WORKER);
+	struct message_queue * q = NULL;
 	for (;;) {
-		if (skynet_context_message_dispatch(sm)) {
+		q = skynet_context_message_dispatch(sm, q, weight);
+		if (q == NULL) {
 			CHECK_ABORT
 			if (pthread_mutex_lock(&m->mutex) == 0) {
 				++ m->sleep;
@@ -141,12 +148,12 @@ static void
 _start(int thread) {
 	pthread_t pid[thread+3];
 
-	struct monitor *m = malloc(sizeof(*m));
+	struct monitor *m = skynet_malloc(sizeof(*m));
 	memset(m, 0, sizeof(*m));
 	m->count = thread;
 	m->sleep = 0;
 
-	m->m = malloc(thread * sizeof(struct skynet_monitor *));
+	m->m = skynet_malloc(thread * sizeof(struct skynet_monitor *));
 	int i;
 	for (i=0;i<thread;i++) {
 		m->m[i] = skynet_monitor_new();
@@ -164,10 +171,20 @@ _start(int thread) {
 	create_thread(&pid[1], _timer, m);
 	create_thread(&pid[2], _socket, m);
 
+	static int weight[] = { 
+		-1, -1, -1, -1, 0, 0, 0, 0,
+		1, 1, 1, 1, 1, 1, 1, 1, 
+		2, 2, 2, 2, 2, 2, 2, 2, 
+		3, 3, 3, 3, 3, 3, 3, 3, };
 	struct worker_parm wp[thread];
 	for (i=0;i<thread;i++) {
 		wp[i].m = m;
 		wp[i].id = i;
+		if (i < sizeof(weight)/sizeof(weight[0])) {
+			wp[i].weight= weight[i];
+		} else {
+			wp[i].weight = 0;
+		}
 		create_thread(&pid[i+3], _worker, &wp[i]);
 	}
 
@@ -178,17 +195,27 @@ _start(int thread) {
 	free_monitor(m);
 }
 
-static int
-_start_master(const char * master) {
-	struct skynet_context *ctx = skynet_context_new("master", master);
-	if (ctx == NULL)
-		return 1;
-	return 0;	
+static void
+bootstrap(struct skynet_context * logger, const char * cmdline) {
+	int sz = strlen(cmdline);
+	char name[sz+1];
+	char args[sz+1];
+	sscanf(cmdline, "%s %s", name, args);
+	struct skynet_context *ctx = skynet_context_new(name, args);
+	if (ctx == NULL) {
+		skynet_error(NULL, "Bootstrap error : %s\n", cmdline);
+		skynet_context_dispatchall(logger);
+		exit(1);
+	}
 }
 
 void 
 skynet_start(struct skynet_config * config) {
-	skynet_group_init();
+	if (config->daemon) {
+		if (daemon_init(config->daemon)) {
+			exit(1);
+		}
+	}
 	skynet_harbor_init(config->harbor);
 	skynet_handle_init(config->harbor);
 	skynet_mq_init();
@@ -196,37 +223,17 @@ skynet_start(struct skynet_config * config) {
 	skynet_timer_init();
 	skynet_socket_init();
 
-	struct skynet_context *ctx;
-	ctx = skynet_context_new("logger", config->logger);
+	struct skynet_context *ctx = skynet_context_new("logger", config->logger);
 	if (ctx == NULL) {
-		fprintf(stderr,"launch logger error");
+		fprintf(stderr, "Can't launch logger service\n");
 		exit(1);
 	}
 
-	if (config->standalone) {
-		if (_start_master(config->standalone)) {
-			fprintf(stderr, "Init fail : mater");
-			return;
-		}
-	}
-	// harbor must be init first
-	if (skynet_harbor_start(config->master , config->local)) {
-		fprintf(stderr, "Init fail : no master");
-		return;
-	}
-
-	ctx = skynet_context_new("localcast", NULL);
-	if (ctx == NULL) {
-		fprintf(stderr,"launch local cast error");
-		exit(1);
-	}
-	ctx = skynet_context_new("snlua", "launcher");
-	if (ctx) {
-		skynet_command(ctx, "REG", ".launcher");
-		ctx = skynet_context_new("snlua", config->start);
-	}
+	bootstrap(ctx, config->bootstrap);
 
 	_start(config->thread);
 	skynet_socket_free();
+	if (config->daemon) {
+		daemon_exit(config->daemon);
+	}
 }
-

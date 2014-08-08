@@ -1,3 +1,5 @@
+#include "skynet_malloc.h"
+
 #include <lua.h>
 #include <lauxlib.h>
 
@@ -53,7 +55,7 @@ little_endian(uint32_t v) {
 typedef void * document;
 
 static inline uint32_t
-get_length(const document buffer) {
+get_length(document buffer) {
 	union {
 		uint32_t v;
 		uint8_t b[4];
@@ -65,7 +67,7 @@ get_length(const document buffer) {
 static inline void
 buffer_destroy(struct buffer *b) {
 	if (b->ptr != b->buffer) {
-		free(b->ptr);
+		skynet_free(b->ptr);
 	}
 }
 
@@ -85,10 +87,10 @@ buffer_reserve(struct buffer *b, int sz) {
 	} while (b->cap <= b->size + sz);
 
 	if (b->ptr == b->buffer) {
-		b->ptr = malloc(b->cap);
+		b->ptr = skynet_malloc(b->cap);
 		memcpy(b->ptr, b->buffer, b->size);
 	} else {
-		b->ptr = realloc(b->ptr, b->cap);
+		b->ptr = skynet_realloc(b->ptr, b->cap);
 	}
 }
 
@@ -241,7 +243,7 @@ op_reply(lua_State *L) {
 			lua_pushlightuserdata(L, (void *)doc);
 			lua_rawseti(L, 2, i);
 
-			int32_t doc_len = get_length((const document)doc);
+			int32_t doc_len = get_length((document)doc);
 
 			doc += doc_len;
 			sz -= doc_len;
@@ -258,6 +260,13 @@ op_reply(lua_State *L) {
 			lua_pushnil(L);
 			lua_rawseti(L, 2, i);
 		}
+	} else {
+		if (sz >= 4) {
+			sz -= get_length((document)doc);
+		}
+	}
+	if (sz != 0) {
+		return luaL_error(L, "Invalid result bson document");
 	}
 	lua_pushboolean(L,1);
 	lua_pushinteger(L, id);
@@ -497,7 +506,7 @@ op_insert(lua_State *L) {
 		int i;
 		for (i=1;i<=s;i++) {
 			lua_rawgeti(L,3,i);
-			document doc = lua_touserdata(L,3);
+			document doc = lua_touserdata(L,-1);
 			luaL_addlstring(&b, (const char *)doc, get_length(doc));
 			lua_pop(L,1);
 		}
