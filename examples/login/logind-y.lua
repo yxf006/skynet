@@ -15,19 +15,27 @@ local server_list = {}
 local user_online = {}
 local user_login = {}
 
+
+
 function server.auth_handler(token)
 	-- the token is base64(user)@base64(server):base64(password)
 	local user, server, password = token:match("([^@]+)@([^:]+):(.+)")
 	user = crypt.base64decode(user)
 	server = crypt.base64decode(server)
 	password = crypt.base64decode(password)
-	assert(password == "password")
-  
+	--assert(password == "password")
   local ps=snax.queryservice("redisquery_server")
-  print(ps.req.verifyuser("skynetlogin","007"))
-  print(ps.req.verifyuser("jamesbond","007"))
+  if("u100"==ps.req.verifyuser(user,password)) then
+    print( "bingo "..user.." verify ok ")
+    return server, user
+  else 
+    print("no user "..user.." verify fail ")
+    assert(false)
+  end
   
-	return server, user
+  
+  
+	
 end
 
 function server.login_handler(server, uid, secret)
@@ -44,6 +52,12 @@ function server.login_handler(server, uid, secret)
 
 	local subid = tostring(skynet.call(gameserver, "lua", "login", uid, secret))
 	user_online[uid] = { address = gameserver, subid = subid , server = server}
+  --[[
+  for k,v in pairs(user_online) do
+    print(k,v)
+  end
+  --]]
+  
 	return subid
 end
 

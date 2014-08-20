@@ -19,14 +19,16 @@ function init(...)
 end
 
 
-function response.verifyuser(id,pwd)
-    print("start user verify:","id =",id,"pwd = ",pwd)
+function response.verifyuser(uid,pwd)
+    print("start user verify:","uid =",uid,"pwd = ",pwd)
     --assert (db:get(id) ==pwd,"no user")
-    if  (db:get(id) ==pwd) then
-        return "bingo"
+    if  (db:get(uid) ==pwd) then
+        --print( "bingo "..uid.." verify ok ")
+        return "u100"
 
     else  
-        return "no user"
+        --print("no user "..uid.." verify fail ")
+        return "u404"
     end
 
 

@@ -1,4 +1,5 @@
 local skynet = require "skynet"
+local snax=require "snax"
 
 skynet.start(function()
   print("Logind Server start")
@@ -10,6 +11,8 @@ skynet.start(function()
 	skynet.newservice("debug_console",8000)
 	--skynet.newservice("simpledb")
 	--local watchdog = skynet.newservice("watchdog")
+  
+  local ps=snax.uniqueservice("redisquery_server","")
   
   
 
