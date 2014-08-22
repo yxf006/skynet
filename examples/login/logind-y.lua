@@ -3,12 +3,13 @@ local crypt = require "crypt"
 local skynet = require "skynet"
 
 local snax=require "snax"
-
+--loginserver
 local server = {
 	host = "127.0.0.1",
 	port = 8001,
 	multilogin = false,	-- disallow multilogin
 	name = "login_master",
+  instance=6
 }
 
 local server_list = {}
@@ -80,4 +81,5 @@ function server.command_handler(command, source, ...)
 	return f(source, ...)
 end
 
+--print("begin to login(server)")
 login(server)

@@ -2,7 +2,10 @@ local msgserver = require "snax.msgserver"
 local crypt = require "crypt"
 local skynet = require "skynet"
 
+
+--print(tonumber(...)),convert argument to number
 local loginservice = tonumber(...)
+print ("in gated.lua,loginservice=",loginservice)
 
 local server = {}
 local users = {}
@@ -80,9 +83,9 @@ end
 
 -- call by self (when gate open)
 function server.register_handler(name)
-	servername = name
+  servername = name
 	skynet.call(loginservice, "lua", "register_gate", servername, skynet.self())
 end
-
+print("in geted.lua ,begin msgserver.start(server)")
 msgserver.start(server)
 

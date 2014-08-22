@@ -5,6 +5,9 @@ skynet.start(function()
   print("Logind Server start")
   
 	local loginserver = skynet.newservice("logind-y")
+  print("new service gated,loginserver,loginserver=",loginserver)
+  
+  --return address of gate service 
 	local gate = skynet.newservice("gated", loginserver)
   
 	local console = skynet.newservice("console")
@@ -15,7 +18,7 @@ skynet.start(function()
   local ps=snax.uniqueservice("redisquery_server","")
   
   
-
+  --gameserver
 	skynet.call(gate, "lua", "open" , {
 		port = 8888,
 		maxclient = 64,

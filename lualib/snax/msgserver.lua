@@ -89,6 +89,7 @@ local connection = {}
 function server.userid(username)
 	-- base64(uid)@base64(server)#base64(subid)
 	local uid, servername, subid = username:match "([^@]*)@([^#]*)#(.*)"
+  --print("in msgserver.lua","uid=",b64decode(uid),"servername=", b64decode(servername),"subid=",b64decode(subid))
 	return b64decode(uid), b64decode(subid), b64decode(servername)
 end
 
@@ -123,7 +124,10 @@ function server.ip(username)
 	end
 end
 
+
+
 function server.start(conf)
+  print("in msgserver.lua,server.start(conf),conf=",conf)
 	local expired_number = conf.expired_number or 128
 
 	local handler = {}
@@ -141,6 +145,7 @@ function server.start(conf)
 
 	function handler.open(source, gateconf)
 		local servername = assert(gateconf.servername)
+    print("in msgserver.lua@handler.open","servername=",servername)
 		return conf.register_handler(servername)
 	end
 

@@ -136,6 +136,7 @@ end
 
 local function launch_master(conf)
 	local instance = conf.instance or 8
+  print("instance = ",instance)
 	assert(instance > 0)
 	local host = conf.host or "0.0.0.0"
 	local port = assert(tonumber(conf.port))

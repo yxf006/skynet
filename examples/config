@@ -1,5 +1,5 @@
 root = "./"
-thread = 99
+thread = 8
 logger = nil
 harbor = 1
 address = "127.0.0.1:2526"

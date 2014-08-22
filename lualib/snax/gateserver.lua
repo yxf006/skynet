@@ -28,6 +28,7 @@ function gateserver.closeclient(fd)
 end
 
 function gateserver.start(handler)
+  print("in geteserver.lua,function gateserver.start(handler),handler=",handler)
 	assert(handler.message)
 	assert(handler.connect)
 
