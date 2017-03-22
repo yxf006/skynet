@@ -22,7 +22,7 @@ function handler.message(fd, msg, sz)
 	local c = connection[fd]
 	local agent = c.agent
 	if agent then
-		skynet.redirect(agent, c.client, "client", 0, msg, sz)
+		skynet.redirect(agent, c.client, "client", 1, msg, sz)
 	else
 		skynet.send(watchdog, "lua", "socket", "data", fd, netpack.tostring(msg, sz))
 	end
@@ -31,7 +31,7 @@ end
 function handler.connect(fd, addr)
 	local c = {
 		fd = fd,
-		ip = msg,
+		ip = addr,
 	}
 	connection[fd] = c
 	skynet.send(watchdog, "lua", "socket", "open", fd, addr)
@@ -61,6 +61,10 @@ end
 function handler.error(fd, msg)
 	close_fd(fd)
 	skynet.send(watchdog, "lua", "socket", "error", fd, msg)
+end
+
+function handler.warning(fd, size)
+	skynet.send(watchdog, "lua", "socket", "warning", fd, size)
 end
 
 local CMD = {}

@@ -1,6 +1,7 @@
 #include "skynet.h"
 #include "skynet_harbor.h"
 #include "skynet_socket.h"
+#include "skynet_handle.h"
 
 /*
 	harbor listen the PTYPE_HARBOR (in text)
@@ -36,17 +37,17 @@ struct remote_message_header {
 	uint32_t session;
 };
 
-struct msg {
+struct harbor_msg {
 	struct remote_message_header header;
 	void * buffer;
 	size_t size;
 };
 
-struct msg_queue {
+struct harbor_msg_queue {
 	int size;
 	int head;
 	int tail;
-	struct msg * data;
+	struct harbor_msg * data;
 };
 
 struct keyvalue {
@@ -54,7 +55,7 @@ struct keyvalue {
 	char key[GLOBALNAME_LENGTH];
 	uint32_t hash;
 	uint32_t value;
-	struct msg_queue * queue;
+	struct harbor_msg_queue * queue;
 };
 
 struct hashmap {
@@ -69,7 +70,7 @@ struct hashmap {
 
 struct slave {
 	int fd;
-	struct msg_queue *queue;
+	struct harbor_msg_queue *queue;
 	int status;
 	int length;
 	int read;
@@ -88,11 +89,11 @@ struct harbor {
 // hash table
 
 static void
-push_queue_msg(struct msg_queue * queue, struct msg * m) {
+push_queue_msg(struct harbor_msg_queue * queue, struct harbor_msg * m) {
 	// If there is only 1 free slot which is reserved to distinguish full/empty
 	// of circular buffer, expand it.
 	if (((queue->tail + 1) % queue->size) == queue->head) {
-		struct msg * new_buffer = skynet_malloc(queue->size * 2 * sizeof(struct msg));
+		struct harbor_msg * new_buffer = skynet_malloc(queue->size * 2 * sizeof(struct harbor_msg));
 		int i;
 		for (i=0;i<queue->size-1;i++) {
 			new_buffer[i] = queue->data[(i+queue->head) % queue->size];
@@ -103,46 +104,46 @@ push_queue_msg(struct msg_queue * queue, struct msg * m) {
 		queue->tail = queue->size - 1;
 		queue->size *= 2;
 	}
-	struct msg * slot = &queue->data[queue->tail];
+	struct harbor_msg * slot = &queue->data[queue->tail];
 	*slot = *m;
 	queue->tail = (queue->tail + 1) % queue->size;
 }
 
 static void
-push_queue(struct msg_queue * queue, void * buffer, size_t sz, struct remote_message_header * header) {
-	struct msg m;
+push_queue(struct harbor_msg_queue * queue, void * buffer, size_t sz, struct remote_message_header * header) {
+	struct harbor_msg m;
 	m.header = *header;
 	m.buffer = buffer;
 	m.size = sz;
 	push_queue_msg(queue, &m);
 }
 
-static struct msg *
-pop_queue(struct msg_queue * queue) {
+static struct harbor_msg *
+pop_queue(struct harbor_msg_queue * queue) {
 	if (queue->head == queue->tail) {
 		return NULL;
 	}
-	struct msg * slot = &queue->data[queue->head];
+	struct harbor_msg * slot = &queue->data[queue->head];
 	queue->head = (queue->head + 1) % queue->size;
 	return slot;
 }
 
-static struct msg_queue *
+static struct harbor_msg_queue *
 new_queue() {
-	struct msg_queue * queue = skynet_malloc(sizeof(*queue));
+	struct harbor_msg_queue * queue = skynet_malloc(sizeof(*queue));
 	queue->size = DEFAULT_QUEUE_SIZE;
 	queue->head = 0;
 	queue->tail = 0;
-	queue->data = skynet_malloc(DEFAULT_QUEUE_SIZE * sizeof(struct msg));
+	queue->data = skynet_malloc(DEFAULT_QUEUE_SIZE * sizeof(struct harbor_msg));
 
 	return queue;
 }
 
 static void
-release_queue(struct msg_queue *queue) {
+release_queue(struct harbor_msg_queue *queue) {
 	if (queue == NULL)
 		return;
-	struct msg * m;
+	struct harbor_msg * m;
 	while ((m=pop_queue(queue)) != NULL) {
 		skynet_free(m->buffer);
 	}
@@ -312,19 +313,27 @@ forward_local_messsage(struct harbor *h, void *msg, int sz) {
 	message_to_header((const uint32_t *)cookie, &header);
 
 	uint32_t destination = header.destination;
-	int type = (destination >> HANDLE_REMOTE_SHIFT) | PTYPE_TAG_DONTCOPY;
+	int type = destination >> HANDLE_REMOTE_SHIFT;
 	destination = (destination & HANDLE_MASK) | ((uint32_t)h->id << HANDLE_REMOTE_SHIFT);
 
-	if (skynet_send(h->ctx, header.source, destination, type, (int)header.session, (void *)msg, sz-HEADER_COOKIE_LENGTH) < 0) {
-		skynet_error(h->ctx, "Unknown destination :%x from :%x", destination, header.source);
+	if (skynet_send(h->ctx, header.source, destination, type | PTYPE_TAG_DONTCOPY , (int)header.session, (void *)msg, sz-HEADER_COOKIE_LENGTH) < 0) {
+		if (type != PTYPE_ERROR) {
+			// don't need report error when type is error
+			skynet_send(h->ctx, destination, header.source , PTYPE_ERROR, (int)header.session, NULL, 0);
+		}
+		skynet_error(h->ctx, "Unknown destination :%x from :%x type(%d)", destination, header.source, type);
 	}
 }
 
 static void
 send_remote(struct skynet_context * ctx, int fd, const char * buffer, size_t sz, struct remote_message_header * cookie) {
-	uint32_t sz_header = sz+sizeof(*cookie);
+	size_t sz_header = sz+sizeof(*cookie);
+	if (sz_header > UINT32_MAX) {
+		skynet_error(ctx, "remote message from :%08x to :%08x is too large.", cookie->source, cookie->destination);
+		return;
+	}
 	uint8_t * sendbuf = skynet_malloc(sz_header+4);
-	to_bigendian(sendbuf, sz_header);
+	to_bigendian(sendbuf, (uint32_t)sz_header);
 	memcpy(sendbuf+4, buffer, sz);
 	header_to_message(cookie, sendbuf+4+sz);
 
@@ -334,10 +343,9 @@ send_remote(struct skynet_context * ctx, int fd, const char * buffer, size_t sz,
 
 static void
 dispatch_name_queue(struct harbor *h, struct keyvalue * node) {
-	struct msg_queue * queue = node->queue;
+	struct harbor_msg_queue * queue = node->queue;
 	uint32_t handle = node->value;
 	int harbor_id = handle >> HANDLE_REMOTE_SHIFT;
-	assert(harbor_id != 0);
 	struct skynet_context * context = h->ctx;
 	struct slave *s = &h->s[harbor_id];
 	int fd = s->fd;
@@ -352,18 +360,29 @@ dispatch_name_queue(struct harbor *h, struct keyvalue * node) {
 				s->queue = node->queue;
 				node->queue = NULL;
 			} else {
-				struct msg * m;
+				struct harbor_msg * m;
 				while ((m = pop_queue(queue))!=NULL) {
 					push_queue_msg(s->queue, m);
 				}
 			}
+			if (harbor_id == (h->slave >> HANDLE_REMOTE_SHIFT)) {
+				// the harbor_id is local
+				struct harbor_msg * m;
+				while ((m = pop_queue(s->queue)) != NULL) {
+					int type = m->header.destination >> HANDLE_REMOTE_SHIFT;
+					skynet_send(context, m->header.source, handle , type | PTYPE_TAG_DONTCOPY, m->header.session, m->buffer, m->size);
+				}
+				release_queue(s->queue);
+				s->queue = NULL;
+			}
 		}
 		return;
 	}
-	struct msg * m;
+	struct harbor_msg * m;
 	while ((m = pop_queue(queue)) != NULL) {
 		m->header.destination |= (handle & HANDLE_MASK);
 		send_remote(context, fd, m->buffer, m->size, &m->header);
+		skynet_free(m->buffer);
 	}
 }
 
@@ -373,13 +392,14 @@ dispatch_queue(struct harbor *h, int id) {
 	int fd = s->fd;
 	assert(fd != 0);
 
-	struct msg_queue *queue = s->queue;
+	struct harbor_msg_queue *queue = s->queue;
 	if (queue == NULL)
 		return;
 
-	struct msg * m;
+	struct harbor_msg * m;
 	while ((m = pop_queue(queue)) != NULL) {
 		send_remote(h->ctx, fd, m->buffer, m->size, &m->header);
+		skynet_free(m->buffer);
 	}
 	release_queue(queue);
 	s->queue = NULL;
@@ -654,6 +674,13 @@ mainloop(struct skynet_context * context, void * ud, int type, int session, uint
 		case SKYNET_SOCKET_TYPE_CONNECT:
 			// fd forward to this service
 			break;
+		case SKYNET_SOCKET_TYPE_WARNING: {
+			int id = harbor_id(h, message->id);
+			if (id) {
+				skynet_error(context, "message havn't send to Harbor (%d) reach %d K", id, message->ud);
+			}
+			break;
+		}
 		default:
 			skynet_error(context, "recv invalid socket message type %d", type);
 			break;

@@ -1,17 +1,21 @@
 package.cpath = "luaclib/?.so"
+package.path = "lualib/?.lua;examples/?.lua"
+
+if _VERSION ~= "Lua 5.3" then
+	error "Use lua 5.3"
+end
 
 local socket = require "clientsocket"
-local cjson = require "cjson"
-local bit32 = require "bit32"
+local proto = require "proto"
+local sproto = require "sproto"
+
+local host = sproto.new(proto.s2c):host "package"
+local request = host:attach(sproto.new(proto.c2s))
 
 local fd = assert(socket.connect("127.0.0.1", 8888))
 
 local function send_package(fd, pack)
-	local size = #pack
-	local package = string.char(bit32.extract(size,8,8)) ..
-		string.char(bit32.extract(size,0,8))..
-		pack
-
+	local package = string.pack(">s2", pack)
 	socket.send(fd, package)
 end
 
@@ -46,33 +50,65 @@ end
 
 local session = 0
 
-local function send_request(v)
+local function send_request(name, args)
 	session = session + 1
-	local str = string.format("%d+%s",session, cjson.encode(v))
+	local str = request(name, args, session)
 	send_package(fd, str)
 	print("Request:", session)
 end
 
 local last = ""
 
-while true do
+local function print_request(name, args)
+	print("REQUEST", name)
+	if args then
+		for k,v in pairs(args) do
+			print(k,v)
+		end
+	end
+end
+
+local function print_response(session, args)
+	print("RESPONSE", session)
+	if args then
+		for k,v in pairs(args) do
+			print(k,v)
+		end
+	end
+end
+
+local function print_package(t, ...)
+	if t == "REQUEST" then
+		print_request(...)
+	else
+		assert(t == "RESPONSE")
+		print_response(...)
+	end
+end
+
+local function dispatch_package()
 	while true do
 		local v
 		v, last = recv_package(last)
 		if not v then
 			break
 		end
-		local session,t,str = string.match(v, "(%d+)(.)(.*)")
-		assert(t == '-' or t == '+')
-		session = tonumber(session)
-		local result = cjson.decode(str)
-		print("Response:",session, result[1], result[2])
+
+		print_package(host:dispatch(v))
 	end
+end
+
+send_request("handshake")
+send_request("set", { what = "hello", value = "world" })
+while true do
+	dispatch_package()
 	local cmd = socket.readstdin()
 	if cmd then
-		local args = {}
-		string.gsub(cmd, '[^ ]+', function(v) table.insert(args, v) end )
-		send_request(args)
+		if cmd == "quit" then
+			send_request("quit")
+		else
+			send_request("get", { what = cmd })
+		end
 	else
 		socket.usleep(100)
 	end

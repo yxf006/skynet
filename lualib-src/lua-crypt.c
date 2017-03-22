@@ -1,3 +1,5 @@
+#define LUA_LIB
+
 #include <lua.h>
 #include <lauxlib.h>
 
@@ -10,7 +12,7 @@
 
 /* the eight DES S-boxes */
 
-uint32_t SB1[64] = {
+static uint32_t SB1[64] = {
 	0x01010400, 0x00000000, 0x00010000, 0x01010404,
 	0x01010004, 0x00010404, 0x00000004, 0x00010000,
 	0x00000400, 0x01010400, 0x01010404, 0x00000400,
@@ -338,8 +340,13 @@ static int
 lrandomkey(lua_State *L) {
 	char tmp[8];
 	int i;
+	char x = 0;
 	for (i=0;i<8;i++) {
 		tmp[i] = random() & 0xff;
+		x ^= tmp[i];
+	}
+	if (x==0) {
+		tmp[0] |= 1;	// avoid 0
 	}
 	lua_pushlstring(L, tmp, 8);
 	return 1;
@@ -489,7 +496,7 @@ static int
 lfromhex(lua_State *L) {
 	size_t sz = 0;
 	const char * text = luaL_checklstring(L, 1, &sz);
-	if (sz & 2) {
+	if (sz & 1) {
 		return luaL_error(L, "Invalid hex text size %d", (int)sz);
 	}
 	char tmp[SMALL_CHUNK];
@@ -589,11 +596,11 @@ read64(lua_State *L, uint32_t xx[2], uint32_t yy[2]) {
 	size_t sz = 0;
 	const uint8_t *x = (const uint8_t *)luaL_checklstring(L, 1, &sz);
 	if (sz != 8) {
-		luaL_error(L, "Invalid hmac x");
+		luaL_error(L, "Invalid uint64 x");
 	}
 	const uint8_t *y = (const uint8_t *)luaL_checklstring(L, 2, &sz);
 	if (sz != 8) {
-		luaL_error(L, "Invalid hmac y");
+		luaL_error(L, "Invalid uint64 y");
 	}
 	xx[0] = x[0] | x[1]<<8 | x[2]<<16 | x[3]<<24;
 	xx[1] = x[4] | x[5]<<8 | x[6]<<16 | x[7]<<24;
@@ -602,11 +609,7 @@ read64(lua_State *L, uint32_t xx[2], uint32_t yy[2]) {
 }
 
 static int
-lhmac64(lua_State *L) {
-	uint32_t x[2], y[2];
-	read64(L, x, y);
-	uint32_t result[2];
-	hmac(x,y,result);
+pushqword(lua_State *L, uint32_t result[2]) {
 	uint8_t tmp[8];
 	tmp[0] = result[0] & 0xff;
 	tmp[1] = (result[0] >> 8 )& 0xff;
@@ -619,6 +622,40 @@ lhmac64(lua_State *L) {
 
 	lua_pushlstring(L, (const char *)tmp, 8);
 	return 1;
+}
+
+static int
+lhmac64(lua_State *L) {
+	uint32_t x[2], y[2];
+	read64(L, x, y);
+	uint32_t result[2];
+	hmac(x,y,result);
+	return pushqword(L, result);
+}
+
+/*
+	8bytes key
+	string text
+ */
+static int
+lhmac_hash(lua_State *L) {
+	uint32_t key[2];
+	size_t sz = 0;
+	const uint8_t *x = (const uint8_t *)luaL_checklstring(L, 1, &sz);
+	if (sz != 8) {
+		luaL_error(L, "Invalid uint64 key");
+	}
+	key[0] = x[0] | x[1]<<8 | x[2]<<16 | x[3]<<24;
+	key[1] = x[4] | x[5]<<8 | x[6]<<16 | x[7]<<24;
+	const char * text = luaL_checklstring(L, 2, &sz);
+	uint8_t h[8];
+	Hash(text,(int)sz,h);
+	uint32_t htext[2];
+	htext[0] = h[0] | h[1]<<8 | h[2]<<16 | h[3]<<24;
+	htext[1] = h[4] | h[5]<<8 | h[6]<<16 | h[7]<<24;
+	uint32_t result[2];
+	hmac(htext,key,result);
+	return pushqword(L, result);
 }
 
 // powmodp64 for DH-key exchange
@@ -688,8 +725,11 @@ static int
 ldhsecret(lua_State *L) {
 	uint32_t x[2], y[2];
 	read64(L, x, y);
-	uint64_t r = powmodp((uint64_t)x[0] | (uint64_t)x[1]<<32,
-		(uint64_t)y[0] | (uint64_t)y[1]<<32);
+	uint64_t xx = (uint64_t)x[0] | (uint64_t)x[1]<<32;
+	uint64_t yy = (uint64_t)y[0] | (uint64_t)y[1]<<32;
+	if (xx == 0 || yy == 0)
+		return luaL_error(L, "Can't be 0");
+	uint64_t r = powmodp(xx, yy);
 
 	push64(L, r);
 
@@ -703,13 +743,17 @@ ldhexchange(lua_State *L) {
 	size_t sz = 0;
 	const uint8_t *x = (const uint8_t *)luaL_checklstring(L, 1, &sz);
 	if (sz != 8) {
-		luaL_error(L, "Invalid hmac x");
+		luaL_error(L, "Invalid dh uint64 key");
 	}
 	uint32_t xx[2];
 	xx[0] = x[0] | x[1]<<8 | x[2]<<16 | x[3]<<24;
 	xx[1] = x[4] | x[5]<<8 | x[6]<<16 | x[7]<<24;
 
-	uint64_t r = powmodp(5,	(uint64_t)xx[0] | (uint64_t)xx[1]<<32);
+	uint64_t x64 = (uint64_t)xx[0] | (uint64_t)xx[1]<<32;
+	if (x64 == 0)
+		return luaL_error(L, "Can't be 0");
+
+	uint64_t r = powmodp(G,	x64);
 	push64(L, r);
 	return 1;
 }
@@ -836,10 +880,38 @@ lb64decode(lua_State *L) {
 	return 1;
 }
 
-int
+static int
+lxor_str(lua_State *L) {
+	size_t len1,len2;
+	const char *s1 = luaL_checklstring(L,1,&len1);
+	const char *s2 = luaL_checklstring(L,2,&len2);
+	if (len2 == 0) {
+		return luaL_error(L, "Can't xor empty string");
+	}
+	luaL_Buffer b;
+	char * buffer = luaL_buffinitsize(L, &b, len1);
+	int i;
+	for (i=0;i<len1;i++) {
+		buffer[i] = s1[i] ^ s2[i % len2];
+	}
+	luaL_addsize(&b, len1);
+	luaL_pushresult(&b);
+	return 1;
+}
+
+// defined in lsha1.c
+int lsha1(lua_State *L);
+int lhmac_sha1(lua_State *L);
+
+LUAMOD_API int
 luaopen_crypt(lua_State *L) {
 	luaL_checkversion(L);
-	srandom(time(NULL));
+	static int init = 0;
+	if (!init) {
+		// Don't need call srandom more than once.
+		init = 1 ;
+		srandom(time(NULL));
+	}
 	luaL_Reg l[] = {
 		{ "hashkey", lhashkey },
 		{ "randomkey", lrandomkey },
@@ -852,6 +924,10 @@ luaopen_crypt(lua_State *L) {
 		{ "dhsecret", ldhsecret },
 		{ "base64encode", lb64encode },
 		{ "base64decode", lb64decode },
+		{ "sha1", lsha1 },
+		{ "hmac_sha1", lhmac_sha1 },
+		{ "hmac_hash", lhmac_hash },
+		{ "xor_str", lxor_str },
 		{ NULL, NULL },
 	};
 	luaL_newlib(L,l);
